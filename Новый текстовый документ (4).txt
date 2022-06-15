@@ -1,0 +1,238 @@
+CREATE OR REPLACE FUNCTION "r40"."p_registry_evnps_calc_price"(IN "p_item_type" varchar, IN "p_pos_code" text, IN "p_tariff" numeric, IN "p_quantity" float8, IN "p_evn_id" int8, IN "p_serv_date" timestamp, IN "p_registry_id" int8, OUT "price" numeric)
+  RETURNS "pg_catalog"."numeric" AS $BODY$
+DECLARE
+		_csg_ex_arr_ks100                VARCHAR[];  -- массивs КСГ 
+		_csg_ex_arr_ds100                VARCHAR[];  
+		_csg_ex_arr_ks80                VARCHAR[]; 
+		_csg_ex_arr_ds80                VARCHAR[];  
+		
+		_profile text;
+		_2ksg text;
+		_rez int8;
+		_serv_codes_arr TEXT[];
+		_is_res boolean := false; 
+		_is_nom boolean := false;
+		_code_sh text;
+
+BEGIN
+
+
+ select rd.lpusectionprofile_code into _profile from r40.v_registrydata rd where evn_id = p_evn_id;
+ 
+ select rd.region_data->>'is_2ksg_pay' into _2ksg from r40.v_registrydata rd where evn_id = p_evn_id and rd.registry_id = p_registry_id;
+ 
+select resultdesease_id into _rez from v_EvnLeaveBase where EvnLeaveBase_pid = p_evn_id;
+ 
+
+
+ /*select array_agg (ru.registryusluga_codeusl) into _serv_codes_arr from r40.v_registrydata rd
+ join r40.v_registryusluga ru on ru.evn_id = rd.evn_id
+ where rd.evn_id = p_evn_id;*/
+ 
+select distinct case 
+									--	when _2ksg = 'true' and _rez = 400101000000002 and leavetype_id = 458 then false
+										when leavetype_id in (448,458,449,450,451,452,446, 447, 400101000000149, 400101000000150,400101000000152, 400101000000153, 400101000000169, 400101000000170) then true end
+ into _is_res  -- прерванные случаи
+from v_evnsection
+where EvnSection_id = p_evn_id ; --and leavetype_id in (448,458,449,450,451,452,446, 447, 400101000000149, 400101000000150,400101000000152, 400101000000153, 400101000000169, 400101000000170);
+
+
+IF _is_res is NULL
+	THEN _is_res = false;
+END IF;
+
+ raise notice 'прерванный? %', _is_res;
+ 
+ /*select distinct true into _is_nom 
+from r40.registryusluga 
+where evn_id = p_evn_id 
+and registryusluga_codeusl ~ '^A16';
+
+IF _is_nom is NULL
+	THEN _is_nom = false;
+END IF;
+
+raise notice 'присутствие услуг влияющих на тарификацию - %', _is_nom;*/
+ 
+ --Схемы лекарственной терапии
+    select 
+					DTS.DrugTherapyScheme_Code::text into _code_sh 
+        
+      from r40.registrydata rd 
+       join r40.registryusluga ru on rd.registry_id = ru.registry_id and rd.evn_id = ru.evn_id 
+       join v_MorbusOnkoDrug MorbusOnkoDrug on MorbusOnkoDrug.evn_id = ru.evnusluga_id
+       join fed.DrugMnn on MorbusOnkoDrug.DrugMnn_id = DrugMnn.DrugMNN_id
+       join Diag on Diag.Diag_id = rd.Diag_id
+       
+       left join lateral (
+          select DTSMNNLink.DrugTherapyScheme_id from v_DrugTherapySchemeMNNLink DTSMNNLink  
+           join EvnSectionDrugTherapyScheme ESDTS on DTSMNNLink.DrugTherapyScheme_id = ESDTS.DrugTherapyScheme_id and ESDTS.EvnSection_id = rd.evn_id
+          where DTSMNNLink.DrugMNN_id = DrugMnn.DrugMnn_id
+          limit 1
+       ) DTSMNNLink on true
+      	
+       left join lateral (  
+        select ES_DTS.DrugTherapyScheme_id from EvnSectionDrugTherapyScheme ES_DTS  
+         left join v_DrugTherapySchemeMNNLink DTSMNNLink on DTSMNNLink.DrugTherapyScheme_id = ES_DTS.DrugTherapyScheme_id
+        where 
+          ES_DTS.EvnSection_id = rd.Evn_id 
+          --and DTSMNNLink.DrugTherapyScheme_id is null --убрал условие - его покроет валидация Err_Regnum_Code_sh
+        limit 1
+       ) DTSMNNLinkES on true
+       
+       left join v_drugtherapyscheme DTS on coalesce(DTSMNNLink.DrugTherapyScheme_id,DTSMNNLinkES.DrugTherapyScheme_id) = DTS.DrugTherapyScheme_id
+       
+      where rd.evn_id = p_evn_id;
+
+
+raise notice 'Схемы лекарственной терапии - %', _code_sh;
+
+
+		_csg_ex_arr_ks100 = array(select csg_code1 from r40.klg_csg_ex  where ex_code = 'full_payment' AND care_regimen_code = 'KS_CSG' and to_dt is null); -- Т1
+		_csg_ex_arr_ks80 = array(select csg_code1 from r40.klg_csg_ex  where ex_code = '80%' AND care_regimen_code = 'KS_CSG' and to_dt is null); --Т2
+    _csg_ex_arr_ds100 = array(select csg_code1 from r40.klg_csg_ex  where ex_code = 'full_payment' AND care_regimen_code = 'DS_CSG' and to_dt is null); --Т3
+    _csg_ex_arr_ds80 = array(select csg_code1 from r40.klg_csg_ex  where ex_code = '80%' AND care_regimen_code = 'DS_CSG' and to_dt is null); --Т4
+
+raise notice 'таблица ks100 - % ksg - %', p_pos_code = ANY (_csg_ex_arr_ks100), p_pos_code;
+raise notice 'таблица ks80 - % ksg - %', p_pos_code = ANY (_csg_ex_arr_ks80), p_pos_code;
+raise notice 'таблица ds100 - % ksg - %', p_pos_code = ANY (_csg_ex_arr_ds100), p_pos_code;
+raise notice 'таблица ds80 - % ksg - %', p_pos_code = ANY (_csg_ex_arr_ds80), p_pos_code;
+
+
+ price :=
+        p_tariff 
+        *
+				case when p_serv_date::date < '01.01.2022'::date then 
+				case when _is_res is false then 
+ 
+									case 
+									when  p_quantity > 3  then 1
+							    when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 
+									when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY	(_csg_ex_arr_ds100)  then 1 
+									when p_quantity > 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100) then 1
+									when p_quantity > 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds100) then 1
+		              when p_quantity <= 3 and p_item_type IN ('hospital')  and p_pos_code = ANY (_csg_ex_arr_ks80)  then 0.8
+									when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds80)  then 0.8
+									when  p_quantity <= 3   then 0.2
+										else 1
+									end
+				else 
+					case
+									when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 --
+									when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY	(_csg_ex_arr_ds100)  then 1 
+									when p_quantity > 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100) then 1
+									when p_quantity > 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds100) then 1
+									
+									when  p_quantity <= 3 and _is_nom   then 0.8
+									when  p_quantity <= 3 and _is_nom is false  then 0.2
+									when  p_quantity > 3 and _is_nom   then 0.9
+									when  p_quantity > 3 and _is_nom is false  then 0.5									
+
+									else 1
+									
+					end					 
+									
+		 end
+		 
+		 when  p_serv_date::date between '01.01.2022'::date and '28.02.2022'::date then 
+     case when _is_res is false then 
+ 
+                  case 
+                  
+									when p_quantity > 3  then 1
+                  when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 
+                  when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY  (_csg_ex_arr_ds100)  then 1 
+                  when p_quantity > 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100) then 1
+                  when p_quantity > 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds100) then 1
+                  when p_quantity <= 3 and p_item_type IN ('hospital')  and p_pos_code = ANY (_csg_ex_arr_ks80)  then 0.8
+                  when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds80)  then 0.8
+                  when p_quantity <= 2   then 0.3
+									when p_quantity = 3  then 0.5
+                    else 1
+                    
+                  end
+        else 
+          case
+                 -- when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 --
+                 -- when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY  (_csg_ex_arr_ds100)  then 1 
+                 -- when p_quantity > 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100) then 1
+                 -- when p_quantity > 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds100) then 1
+									
+                  
+                 
+									when p_quantity between 1 and 3 and exists ( select code_sh from r40.sh2022 where code_sh = _code_sh and p_pos_code = csg_code and p_quantity >= duration) then 1
+									when p_quantity between 1 and 3 and exists ( select code_sh from r40.sh2022 where code_sh = _code_sh and p_pos_code = csg_code and p_quantity <= duration) then 0.2
+									when p_quantity > 3 and exists ( select code_sh from r40.sh2022 where code_sh = _code_sh and p_pos_code = csg_code and p_quantity <= duration) then 0.5
+									
+									when  p_quantity >= 6    then 0.8
+									when  p_quantity between 3 and 5    then 0.5
+									when  p_quantity <= 2  then 0.3             
+
+                  else 1
+                  
+          end           
+                  
+     end
+		 
+		  when  p_serv_date::date >= '01.03.2022'::date then 
+		 case when _is_res is false then 
+ 
+									case 
+									
+									
+																	
+							    when p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 
+									when p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY	(_csg_ex_arr_ds100)  then 1 
+									
+									when p_quantity > 4 then 1 
+									
+									when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks80) then 0.8
+									when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds80) then 0.8
+									
+									when p_quantity >= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks80) then 1
+									when p_quantity >= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds80) then 1
+									
+									when  p_quantity <= 3   then 0.2
+									
+										else 1
+										
+									end
+				else 
+					case
+									/*when p_quantity <= 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100)  then 1 --
+									when p_quantity <= 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY	(_csg_ex_arr_ds100)  then 1 
+									when p_quantity > 3 and p_item_type IN ('hospital') and p_pos_code = ANY (_csg_ex_arr_ks100) then 1
+									when p_quantity > 3 and p_item_type IN ('day_hospital', 'day_hospital_ambulatory') and p_pos_code = ANY (_csg_ex_arr_ds100) then 1
+									*/
+									when p_pos_code = ANY(_csg_ex_arr_ks80) and p_quantity <= 3 then 0.8
+									when p_pos_code = ANY(_csg_ex_arr_ds80) and p_quantity <= 3 then 0.8
+									
+									when p_pos_code = ANY(_csg_ex_arr_ks80) and p_quantity >= 4 then 0.9
+									when p_pos_code = ANY(_csg_ex_arr_ds80) and p_quantity >= 4 then 0.9
+									
+									when p_quantity between 1 and 3 and exists ( select code_sh from r40.sh2022 where code_sh in (_code_sh) and p_pos_code = csg_code and p_quantity >= duration) then 1
+									when p_quantity between 1 and 3 and exists ( select code_sh from r40.sh2022 where code_sh in (_code_sh) and p_pos_code = csg_code and p_quantity <= duration) then 0.2
+									when p_quantity > 3 and exists ( select code_sh from r40.sh2022 where code_sh in (_code_sh) and p_pos_code = csg_code and p_quantity <= duration) then 0.5
+									
+									when  p_quantity >= 4    then 0.5
+									when  p_quantity <= 3  then 0.2
+									
+
+ 									
+																								
+									else 1
+									
+					end					 
+									
+		 end
+		 
+		 
+	 end;
+					
+END;
+
+
+
+$BODY$
+  LANGUAGE plpgsql IMMUTABLE
+  COST 100
